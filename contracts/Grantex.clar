@@ -17,8 +17,16 @@
 (define-constant ERR_PROPOSAL_ALREADY_EXECUTED (err u115))
 (define-constant ERR_INVALID_PROPOSAL_TYPE (err u116))
 (define-constant ERR_DELEGATION_CYCLE (err u117))
+(define-constant ERR_IMPACT_ALREADY_SUBMITTED (err u118))
+(define-constant ERR_GRANT_NOT_COMPLETED (err u119))
+(define-constant ERR_INVALID_IMPACT_TYPE (err u120))
+(define-constant ERR_INVALID_CITATION_COUNT (err u121))
+(define-constant ERR_OUTPUT_NOT_FOUND (err u122))
+(define-constant ERR_INVALID_IMPACT_SCORE (err u123))
+(define-constant ERR_VERIFICATION_PENDING (err u124))
 
 (define-data-var next-grant-id uint u1)
+(define-data-var next-output-id uint u1)
 (define-data-var next-proposal-id uint u1)
 (define-data-var voting-period-blocks uint u144)
 (define-data-var quorum-threshold uint u1000)
@@ -120,6 +128,85 @@
   }
 )
 
+(define-map research-outputs
+  { output-id: uint }
+  {
+    grant-id: uint,
+    researcher: principal,
+    output-type: (string-ascii 20),
+    title: (string-ascii 200),
+    description: (string-ascii 500),
+    external-url: (string-ascii 200),
+    doi-identifier: (optional (string-ascii 100)),
+    submission-date: uint,
+    verification-status: (string-ascii 20),
+    verifier: (optional principal),
+    initial-citations: uint,
+    current-citations: uint,
+    impact-score: uint,
+    peer-review-score: uint
+  }
+)
+
+(define-map grant-impact-summary
+  { grant-id: uint }
+  {
+    total-outputs: uint,
+    verified-outputs: uint,
+    total-citations: uint,
+    average-impact-score: uint,
+    completion-quality-score: uint,
+    impact-category: (string-ascii 20),
+    last-updated: uint
+  }
+)
+
+(define-map researcher-reputation
+  { researcher: principal }
+  {
+    total-grants-completed: uint,
+    total-research-outputs: uint,
+    total-citations: uint,
+    average-grant-impact: uint,
+    reputation-score: uint,
+    academic-tier: (string-ascii 20),
+    last-grant-completion: uint,
+    verified-outputs-count: uint
+  }
+)
+
+(define-map citation-updates
+  { output-id: uint, update-id: uint }
+  {
+    previous-count: uint,
+    new-count: uint,
+    updated-by: principal,
+    update-date: uint,
+    verification-source: (string-ascii 100)
+  }
+)
+
+(define-map impact-metrics
+  { metric-type: (string-ascii 30) }
+  {
+    threshold-low: uint,
+    threshold-medium: uint,
+    threshold-high: uint,
+    weight-factor: uint
+  }
+)
+
+(define-map output-verification-queue
+  { output-id: uint }
+  {
+    submitted-by: principal,
+    submission-date: uint,
+    assigned-verifier: (optional principal),
+    verification-deadline: uint,
+    priority-level: uint
+  }
+)
+
 (define-public (create-grant 
   (researcher principal) 
   (title (string-ascii 100)) 
@@ -161,43 +248,6 @@
   )
 )
 
-;; (define-private (create-milestones
-;;   (grant-id uint)
-;;   (descriptions (list 10 (string-ascii 200)))
-;;   (amounts (list 10 uint))
-;;   (milestone-id uint))
-;;   (let ((count (len descriptions)))
-;;     (if (not (is-eq count (len amounts)))
-;;       (err u999)
-;;       (letrec
-;;         (
-;;           (create-milestones-loop (lambda (i)
-;;             (if (>= i count)
-;;               (ok true)
-;;               (let (
-;;                 (desc (unwrap-panic (element-at descriptions i)))
-;;                 (amt (unwrap-panic (element-at amounts i)))
-;;               )
-;;                 (map-set milestones
-;;                   { grant-id: grant-id, milestone-id: (+ milestone-id i) }
-;;                   {
-;;                     description: desc,
-;;                     amount: amt,
-;;                     completed: false,
-;;                     completed-at: none,
-;;                     reviewer: none
-;;                   }
-;;                 )
-;;                 (create-milestones-loop (+ i u1))
-;;               )
-;;             )
-;;           ))
-;;         )
-;;         (create-milestones-loop u0)
-;;       )
-;;     )
-;;   )
-;; )
 
 (define-private (add-grant-to-researcher (researcher principal) (grant-id uint))
   (let 
@@ -605,3 +655,324 @@
     false
   )
 )
+
+(define-public (submit-research-output
+  (grant-id uint)
+  (output-type (string-ascii 20))
+  (title (string-ascii 200))
+  (description (string-ascii 500))
+  (external-url (string-ascii 200))
+  (doi-identifier (optional (string-ascii 100)))
+  (initial-citations uint))
+  (let 
+    (
+      (grant (unwrap! (map-get? grants { grant-id: grant-id }) ERR_GRANT_NOT_FOUND))
+      (output-id (var-get next-output-id))
+      (is-researcher (is-eq tx-sender (get researcher grant)))
+      (is-completed (is-eq (get status grant) "completed"))
+    )
+    (asserts! is-researcher ERR_UNAUTHORIZED)
+    (asserts! is-completed ERR_GRANT_NOT_COMPLETED)
+    (asserts! (or 
+      (is-eq output-type "paper")
+      (is-eq output-type "patent")
+      (is-eq output-type "software")
+      (is-eq output-type "dataset")
+      (is-eq output-type "other")) ERR_INVALID_IMPACT_TYPE)
+    
+    (map-set research-outputs
+      { output-id: output-id }
+      {
+        grant-id: grant-id,
+        researcher: tx-sender,
+        output-type: output-type,
+        title: title,
+        description: description,
+        external-url: external-url,
+        doi-identifier: doi-identifier,
+        submission-date: stacks-block-height,
+        verification-status: "pending",
+        verifier: none,
+        initial-citations: initial-citations,
+        current-citations: initial-citations,
+        impact-score: u0,
+        peer-review-score: u0
+      }
+    )
+    
+    (map-set output-verification-queue
+      { output-id: output-id }
+      {
+        submitted-by: tx-sender,
+        submission-date: stacks-block-height,
+        assigned-verifier: none,
+        verification-deadline: (+ stacks-block-height u1008),
+        priority-level: u1
+      }
+    )
+    
+    (var-set next-output-id (+ output-id u1))
+    (unwrap-panic (update-grant-impact-summary grant-id))
+    (ok output-id)
+  )
+)
+
+(define-public (verify-research-output 
+  (output-id uint)
+  (impact-score uint)
+  (peer-review-score uint))
+  (let 
+    (
+      (output (unwrap! (map-get? research-outputs { output-id: output-id }) ERR_OUTPUT_NOT_FOUND))
+      (is-authorized (default-to false (get authorized (map-get? authorized-reviewers { reviewer: tx-sender }))))
+      (queue-item (unwrap! (map-get? output-verification-queue { output-id: output-id }) ERR_OUTPUT_NOT_FOUND))
+    )
+    (asserts! (or (is-eq tx-sender CONTRACT_OWNER) is-authorized) ERR_UNAUTHORIZED)
+    (asserts! (is-eq (get verification-status output) "pending") ERR_VERIFICATION_PENDING)
+    (asserts! (<= impact-score u100) ERR_INVALID_IMPACT_SCORE)
+    (asserts! (<= peer-review-score u100) ERR_INVALID_IMPACT_SCORE)
+    
+    (map-set research-outputs
+      { output-id: output-id }
+      (merge output {
+        verification-status: "verified",
+        verifier: (some tx-sender),
+        impact-score: impact-score,
+        peer-review-score: peer-review-score
+      })
+    )
+    
+    (map-delete output-verification-queue { output-id: output-id })
+    
+    (unwrap-panic (update-grant-impact-summary (get grant-id output)))
+    (unwrap-panic (update-researcher-reputation (get researcher output)))
+    (ok true)
+  )
+)
+
+(define-public (update-citation-count 
+  (output-id uint)
+  (new-citation-count uint)
+  (verification-source (string-ascii 100)))
+  (let 
+    (
+      (output (unwrap! (map-get? research-outputs { output-id: output-id }) ERR_OUTPUT_NOT_FOUND))
+      (is-authorized (default-to false (get authorized (map-get? authorized-reviewers { reviewer: tx-sender }))))
+      (current-citations (get current-citations output))
+      (update-id (+ output-id (mod stacks-block-height u1000)))
+    )
+    (asserts! (or (is-eq tx-sender CONTRACT_OWNER) is-authorized) ERR_UNAUTHORIZED)
+    (asserts! (is-eq (get verification-status output) "verified") ERR_VERIFICATION_PENDING)
+    (asserts! (>= new-citation-count current-citations) ERR_INVALID_CITATION_COUNT)
+    
+    (map-set citation-updates
+      { output-id: output-id, update-id: update-id }
+      {
+        previous-count: current-citations,
+        new-count: new-citation-count,
+        updated-by: tx-sender,
+        update-date: stacks-block-height,
+        verification-source: verification-source
+      }
+    )
+    
+    (map-set research-outputs
+      { output-id: output-id }
+      (merge output { current-citations: new-citation-count })
+    )
+    
+    (unwrap-panic (update-grant-impact-summary (get grant-id output)))
+    (unwrap-panic (update-researcher-reputation (get researcher output)))
+    (ok true)
+  )
+)
+
+(define-public (set-impact-thresholds 
+  (metric-type (string-ascii 30))
+  (threshold-low uint)
+  (threshold-medium uint)
+  (threshold-high uint)
+  (weight-factor uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (< threshold-low threshold-medium) ERR_INVALID_IMPACT_SCORE)
+    (asserts! (< threshold-medium threshold-high) ERR_INVALID_IMPACT_SCORE)
+    (asserts! (<= weight-factor u100) ERR_INVALID_IMPACT_SCORE)
+    
+    (map-set impact-metrics
+      { metric-type: metric-type }
+      {
+        threshold-low: threshold-low,
+        threshold-medium: threshold-medium,
+        threshold-high: threshold-high,
+        weight-factor: weight-factor
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-private (update-grant-impact-summary (grant-id uint))
+  (let 
+    (
+      (grant (unwrap! (map-get? grants { grant-id: grant-id }) ERR_GRANT_NOT_FOUND))
+      (current-summary (default-to 
+        { 
+          total-outputs: u0,
+          verified-outputs: u0,
+          total-citations: u0,
+          average-impact-score: u0,
+          completion-quality-score: u0,
+          impact-category: "low",
+          last-updated: u0
+        } 
+        (map-get? grant-impact-summary { grant-id: grant-id })))
+    )
+    (map-set grant-impact-summary
+      { grant-id: grant-id }
+      (merge current-summary {
+        total-outputs: (+ (get total-outputs current-summary) u1),
+        last-updated: stacks-block-height
+      })
+    )
+    (ok true)
+  )
+)
+
+(define-private (update-researcher-reputation (researcher principal))
+  (let 
+    (
+      (current-rep (default-to 
+        {
+          total-grants-completed: u0,
+          total-research-outputs: u0,
+          total-citations: u0,
+          average-grant-impact: u0,
+          reputation-score: u0,
+          academic-tier: "emerging",
+          last-grant-completion: u0,
+          verified-outputs-count: u0
+        }
+        (map-get? researcher-reputation { researcher: researcher })))
+      (new-outputs (+ (get total-research-outputs current-rep) u1))
+      (new-verified (+ (get verified-outputs-count current-rep) u1))
+      (reputation-boost (calculate-reputation-boost new-outputs new-verified))
+      (new-reputation (+ (get reputation-score current-rep) reputation-boost))
+      (academic-tier (determine-academic-tier new-reputation))
+    )
+    (map-set researcher-reputation
+      { researcher: researcher }
+      (merge current-rep {
+        total-research-outputs: new-outputs,
+        verified-outputs-count: new-verified,
+        reputation-score: (if (> new-reputation u1000) u1000 new-reputation),
+        academic-tier: academic-tier,
+        last-grant-completion: stacks-block-height
+      })
+    )
+    (ok true)
+  )
+)
+
+(define-private (calculate-reputation-boost (outputs uint) (verified uint))
+  (let 
+    (
+      (base-boost (if (> outputs u0) (/ (* verified u100) outputs) u0))
+      (quality-multiplier (if (> base-boost u80) u3 (if (> base-boost u60) u2 u1)))
+    )
+    (* base-boost quality-multiplier)
+  )
+)
+
+(define-private (determine-academic-tier (reputation uint))
+  (if (>= reputation u800)
+    "distinguished"
+    (if (>= reputation u500)
+      "established"
+      (if (>= reputation u200)
+        "developing"
+        "emerging"
+      )
+    )
+  )
+)
+
+(define-read-only (get-research-output (output-id uint))
+  (map-get? research-outputs { output-id: output-id })
+)
+
+(define-read-only (get-grant-impact-summary (grant-id uint))
+  (map-get? grant-impact-summary { grant-id: grant-id })
+)
+
+(define-read-only (get-researcher-reputation (researcher principal))
+  (map-get? researcher-reputation { researcher: researcher })
+)
+
+(define-read-only (get-citation-update (output-id uint) (update-id uint))
+  (map-get? citation-updates { output-id: output-id, update-id: update-id })
+)
+
+(define-read-only (get-impact-metrics (metric-type (string-ascii 30)))
+  (map-get? impact-metrics { metric-type: metric-type })
+)
+
+(define-read-only (get-verification-queue-item (output-id uint))
+  (map-get? output-verification-queue { output-id: output-id })
+)
+
+(define-read-only (calculate-overall-impact-score (grant-id uint))
+  (match (map-get? grant-impact-summary { grant-id: grant-id })
+    summary
+      (let 
+        (
+          (total-outputs (get total-outputs summary))
+          (verified-outputs (get verified-outputs summary))
+          (total-citations (get total-citations summary))
+          (avg-impact (get average-impact-score summary))
+          (verification-rate (if (> total-outputs u0) (/ (* verified-outputs u100) total-outputs) u0))
+          (citation-factor (if (> total-outputs u0) (/ total-citations total-outputs) u0))
+          (impact-score (+ (* avg-impact u50) (* verification-rate u30) (* citation-factor u20)))
+        )
+        (some (if (> impact-score u100) u100 impact-score))
+      )
+    none
+  )
+)
+
+(define-read-only (get-researcher-impact-ranking (researcher principal))
+  (match (map-get? researcher-reputation { researcher: researcher })
+    reputation
+      (let 
+        (
+          (reputation-score (get reputation-score reputation))
+          (outputs (get total-research-outputs reputation))
+          (citations (get total-citations reputation))
+          (tier (get academic-tier reputation))
+          (productivity-score (if (> outputs u0) (* outputs u10) u0))
+          (citation-score (if (> citations u0) (/ citations u10) u0))
+          (overall-ranking (+ reputation-score productivity-score citation-score))
+        )
+        (some {
+          overall-score: (if (> overall-ranking u1000) u1000 overall-ranking),
+          academic-tier: tier,
+          productivity-factor: productivity-score,
+          citation-factor: citation-score,
+          base-reputation: reputation-score
+        })
+      )
+    none
+  )
+)
+
+(define-read-only (get-next-output-id)
+  (var-get next-output-id)
+)
+
+
+
+
+
+
+
+
